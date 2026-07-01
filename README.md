@@ -46,12 +46,17 @@ OpenAI codex CLI/SDK 를 OpenAI 서버 대신 **로컬 Qwen**(ollama 또는 vLLM
 - 로컬 Qwen 백엔드 중 하나:
   - **ollama**: `ollama serve` + `ollama pull qwen3:0.6b` (엔드포인트 `http://localhost:11434/v1`)
   - **vLLM**: `--served-model-name` 으로 Qwen serve (엔드포인트 `http://HOST:8000/v1`)
-- SDK 모드만 추가로: `pip install --prerelease=allow openai-codex`
+- SDK 모드만 추가로 (uv 사용):
+  `uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python --prerelease=allow openai-codex`
+  > 주의: SDK(`openai-codex`)는 **자체 codex 바이너리를 번들**한다(현재 `openai-codex-cli-bin
+  > 0.137.0a4`). 시스템 `codex`(0.142.5)와 버전이 다르므로 SDK 경로는 0.137 동작을 탄다
+  > (ws:// 트랜스포트 문제 없는 세대). CLI 모드는 시스템 codex 를 그대로 쓴다.
 
 ### 2) ollama — 프록시 없이 격리 config 로 직결 (권장)
 
 > 검증됨: codex-cli 0.142.5 + ollama qwen3:0.6b. 격리 `CODEX_HOME` 로 프롬프트
 > "PONG" → codex final "PONG". 전역 `~/.codex` 훅 하나도 안 뜸(격리 확인).
+> `run_codex.py` 의 `--mode cli`/`--mode sdk` 둘 다 ollama 왕복 검증(turns=1 errors=0).
 
 `.codex/config.toml` 의 `model` 을 `ollama list` 의 모델명으로 바꾼 뒤:
 
@@ -92,6 +97,21 @@ python run_codex.py \
   --model Qwen/Qwen3.6-35B-A3B-FP8 \
   --cwd . --prompt "이 레포 구조 요약해줘" --mode cli
 ```
+
+### 5) SDK 모드 (openai-codex 파이썬 SDK)
+
+`run_codex.py --mode sdk` 는 CLI 대신 SDK 로 codex 를 부른다. venv 의 python 으로 실행:
+
+```bash
+.venv/bin/python run_codex.py \
+  --vllm http://localhost:11434/v1 \
+  --model qwen3:0.6b \
+  --cwd . --prompt "이 레포 구조 요약해줘" --mode sdk
+```
+
+SDK 는 `model_providers` 를 코드로 주입한다(아래 "인터페이스 두 가지" 참고).
+ollama 상대로도 프록시를 거치지만, ollama 직결이면 프록시 없이 base_url 을 ollama 로
+직접 줘도 된다(SDK config 의 base_url 만 바꾸면 됨).
 
 ### 4) 코드에서 (라이브러리)
 
@@ -136,7 +156,7 @@ codex.thread_start(
 | `developer` 롤 400 | 백엔드(vLLM)가 developer 거부. 프록시를 거치는지 확인 — codex 가 백엔드에 **직결**돼 있으면 발생. `openai_base_url` 이 프록시(localhost:8731)를 가리키는지 확인. |
 | `stats["errors"]` 에 400/422 | 프록시는 백엔드 에러를 그대로 codex 로 되돌린다. 이 배열을 보면 백엔드가 실제로 뭘 거부했는지 원문이 보인다. |
 | codex 가 함수콜/도구를 안 씀 | 작은 모델(qwen3:0.6b 등)은 tool-use 신뢰성이 낮다. 배선 검증엔 OK, 실제 에이전트 작업엔 큰 Qwen 권장. |
-| `openai-codex` import 실패 | prerelease 다. `pip install --prerelease=allow openai-codex`. CLI 모드는 SDK 불필요. |
+| `openai-codex` import 실패 | prerelease 다. `uv pip install --python .venv/bin/python --prerelease=allow openai-codex`. CLI 모드는 SDK 불필요. |
 | `wire_api=chat` 관련 오류 | codex 0.137+ 은 chat 을 드롭하고 responses 강제. 백엔드가 `/v1/responses` 를 serve 하는지 확인(ollama/vLLM 둘 다 지원). |
 | `unexpected status 200 OK ... ws://` | codex 0.142+ 가 기본 provider 로 WebSocket 트랜스포트를 시도. **커스텀 provider 를 명시**(`model_providers.local.wire_api="responses"`)하면 HTTP 로 간다. `-c openai_base_url` 단독은 안 됨. |
 | `model is required` (ollama 400) | codex 0.142+ 가 responses 바디에 model 을 안 싣는 경우. 프록시 `--model` 로 주입하면 해결(run_codex.py 는 자동 전달). |

@@ -1,0 +1,27 @@
+# 격리된 codex 설정 — 전역 ~/.codex 를 건드리지 않는다.
+# 사용법: CODEX_HOME=/path/to/codex_qwen/.codex codex exec ...
+#
+# ── ollama 직결 (프록시 불필요) ────────────────────────────────────────────
+# ollama 는 codex 의 `developer` 롤을 그냥 받으므로(실측 200) 프록시 없이 직결된다.
+# 핵심은 wire_api="responses" — codex 0.137+ 는 responses 강제, 커스텀 provider 를
+# 명시해야 0.142+ 의 ws:// 트랜스포트로 새지 않는다.
+
+model = "qwen3:0.6b"          # ollama list 의 모델명으로 교체
+model_provider = "local_ollama"
+
+[model_providers.local_ollama]
+name = "Local Ollama"
+base_url = "http://localhost:11434/v1"
+wire_api = "responses"
+
+# 주의: codex 가 런타임에 [projects."..."] trust_level 블록을 이 파일에 덧쓴다.
+# tracked 아티팩트를 깨끗이 유지하려면:  git update-index --skip-worktree .codex/config.toml
+
+# ── vLLM 경로 (developer 롤 거부 → 프록시 필수) ─────────────────────────────
+# vLLM 은 developer 롤을 400 으로 거부하므로 proxy.py 를 앞에 세우고 base_url 을
+# 프록시(localhost:8731)로 돌린다. model_provider 를 아래로 바꿔서 사용:
+#   model_provider = "local_vllm"
+# [model_providers.local_vllm]
+# name = "Local vLLM (via proxy)"
+# base_url = "http://localhost:8731/v1"
+# wire_api = "responses"

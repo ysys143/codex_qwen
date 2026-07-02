@@ -161,6 +161,46 @@ codex.thread_start(
 | `unexpected status 200 OK ... ws://` | codex 0.142+ 가 기본 provider 로 WebSocket 트랜스포트를 시도. **커스텀 provider 를 명시**(`model_providers.local.wire_api="responses"`)하면 HTTP 로 간다. `-c openai_base_url` 단독은 안 됨. |
 | `model is required` (ollama 400) | codex 0.142+ 가 responses 바디에 model 을 안 싣는 경우. 프록시 `--model` 로 주입하면 해결(run_codex.py 는 자동 전달). |
 
+## terminal-bench 어댑터 (`tb_codex_local.py`)
+
+codex 를 로컬 ollama 모델로 [terminal-bench](https://github.com/laude-institute/terminal-bench)
+에 돌리는 커스텀 에이전트. 기본 `CodexAgent` 는 OpenAI 클라우드로만 나가므로, 컨테이너
+안 codex 를 호스트 ollama 로 라우팅하도록 `-c` provider 플래그를 주입한다(codex_qwen
+배선의 이식). 동봉 `codex-setup.sh.j2` 는 컨테이너에 codex 를 설치하는 템플릿.
+
+```bash
+uv tool install terminal-bench                      # tb CLI
+tb datasets download -d terminal-bench-core==0.1.1 --output-dir /tmp/tbcore
+
+export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"   # Colima 사용 시(아래 함정)
+OPENAI_API_KEY=ollama-dummy PYTHONPATH=. tb run \
+  -p /tmp/tbcore -t hello-world \
+  --agent-import-path tb_codex_local:CodexLocalAgent \
+  -m local/gemma4:12b --n-concurrent 1 --no-livestream
+```
+
+`-m local/gemma4:12b` 의 `local/` 접두는 CodexAgent 가 `/` 뒤만 모델명으로 쓰기 때문
+(→ `gemma4:12b`). ollama `list` 의 모델명으로 교체.
+
+### 실측 결과 (codex-cli npm + gemma4:12b, Mac/Colima)
+
+| 태스크 | 난이도 | 결과 |
+|--------|--------|------|
+| hello-world | easy | PASS (~1분, 2/2 테스트) |
+| heterogeneous-dates | medium | PASS (~10분, 3/3) — 단 agent timeout 3600s 필요 |
+
+heterogeneous-dates 는 기본 360s 캡에선 정답을 도출하고도 파일 저장 직전 timeout →
+캡만 늘리면 통과(로컬 12B 추론 속도가 병목, 역량 아님).
+
+### 함정 (실측)
+
+| 증상 | 원인 / 해결 |
+|------|-------------|
+| `docker ... Connection aborted, FileNotFoundError` | tb 의 docker-py 가 소켓 못 찾음. Colima 는 `~/.colima/default/docker.sock` → `DOCKER_HOST` 로 지정. Docker Desktop 이 아닐 때 발생. |
+| `Template file not found: codex-setup.sh.j2` | 커스텀 에이전트는 템플릿을 **자기 모듈 폴더**에서 찾는다(`inspect.getfile`). 원본 템플릿을 어댑터 옆에 복사(동봉함). |
+| Agent 360s timeout / heredoc 멈춤 | tb 가 명령 끝에 `; tmux wait -S done` 를 같은 줄에 붙여 config.toml heredoc 의 종료 `EOF` 를 깬다. → config 파일 대신 `-c` 플래그로 provider 인라인 주입(어댑터가 그렇게 함). |
+| 컨테이너→호스트 ollama | Docker Desktop/Colima 모두 `host.docker.internal` 로 호스트 127.0.0.1:11434 도달(ollama 재바인딩 불필요). |
+
 ## 계보
 
 원본은 `ops_check_engine/research/cx/native_codex.py`(cx 실험용, 채점 로직 혼재).

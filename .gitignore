@@ -18,3 +18,6 @@ build/
 # 격리 CODEX_HOME 런타임 상태 — config.toml 만 tracking
 .codex/*
 !.codex/config.toml
+
+# terminal-bench 실행 산출물(트래젝토리·로그·결과)
+runs/

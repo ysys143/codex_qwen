@@ -78,8 +78,9 @@ codex 는 요청을 OpenAI `/v1/responses` 형식으로 보냅니다. 로컬 백
 서빙하면, codex 가 그쪽을 바라보게만 하면 됩니다.
 
 ```
-[ollama]  codex ─(/v1/responses)────────────────────────▶ ollama:11434  (프록시 불필요)
-[vLLM ]   codex ─(/v1/responses)─▶ proxy.py ─(교정)─▶ vLLM:8000        (프록시 필요)
+[ollama]        codex ─(/v1/responses)──────────────────▶ ollama:11434
+[vLLM · 직결]    codex ─(/v1/responses)──────────────────▶ vLLM:8000      ← 서버 chat_template 패치 시(검증됨)
+[vLLM · 프록시]  codex ─(/v1/responses)─▶ proxy.py ─(교정)─▶ vLLM:8000      ← 서버를 못 고칠 때만
 ```
 
 어느 경로든 두 가지만 지키면 됩니다:
@@ -88,17 +89,24 @@ codex 는 요청을 OpenAI `/v1/responses` 형식으로 보냅니다. 로컬 백
    강제합니다. provider 를 명시해야 최신 codex(0.142+)가 엉뚱한 `ws://` 연결로 새지 않습니다.
 2. **격리 `CODEX_HOME`** — 위에서 본, 개인 환경 보호 장치.
 
-**ollama 는 왜 프록시가 필요 없고 vLLM 은 필요한가?** codex 는 시스템 지시를 `developer`
-라는 역할로 보냅니다. ollama 는 이걸 그냥 받아주지만(실측 200), vLLM 은 거부합니다(400).
-그래서 vLLM 앞에는 `developer` 를 `system` 으로 살짝 바꿔주는 얇은 프록시를 세웁니다.
-(자세한 원인·대안은 맨 아래 "더 알아보기".)
+**vLLM 도 사실 프록시 없이 됩니다.** codex 는 시스템 지시를 `developer` 역할로 보내는데,
+ollama 는 그냥 받지만(실측 200) vLLM 은 거부합니다(400). 이 거부는 vLLM 서버가 쓰는
+chat_template 한 줄에서 나므로, **서버를 직접 관리한다면 template 을 고쳐 프록시 없이
+직결**할 수 있습니다(llm-test 에서 developer→200 검증). 프록시는 **서버를 못 건드릴 때**
+(예: 공유 vLLM)를 위한 대안으로, `developer`→`system` 만 교정해 전달합니다.
+(근거·방법은 맨 아래 "더 알아보기".)
 
 ---
 
 ## vLLM(GPU 서버)에 붙이기
 
-vLLM 은 `developer` 역할을 거부하므로, 사이에 `proxy.py`(이 레포 동봉)를 세웁니다.
-프록시는 요청의 `developer`->`system` 만 고쳐 그대로 전달하는 얇은 중계기입니다.
+vLLM 이 `developer` 를 거부할 때 길은 둘입니다:
+- **(A) 서버를 직접 관리한다면** — `--chat-template` 로 developer 분기를 추가하면 프록시
+  없이 직결됩니다(방법·검증은 맨 아래 "더 알아보기"). 가장 깔끔한 근본 해결입니다.
+- **(B) 서버를 못 건드리면**(공유 vLLM 등) — 아래처럼 `proxy.py`(동봉)를 세웁니다.
+  요청의 `developer`->`system` 만 고쳐 전달하는 얇은 중계기입니다.
+
+아래는 (B) 프록시 경로입니다.
 
 ```bash
 # 터미널 A — 프록시 기동 (--model 로 모델명 주입: 0.142 의 "model required" 회피)

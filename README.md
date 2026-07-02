@@ -1,86 +1,111 @@
 # codex_qwen — codex 에 로컬 Qwen 물리기
 
-OpenAI codex CLI/SDK 를 OpenAI 서버 대신 **로컬 Qwen**(ollama 또는 vLLM)에 물리는
-최소 재료. 물리는 법은 백엔드에 따라 둘로 갈린다:
+OpenAI **codex**(CLI/SDK)를 OpenAI 클라우드 대신 **내 로컬 모델**(ollama·vLLM 위의
+Qwen/gemma 등)에 붙여 쓰는 가장 짧은 방법을 담은 가이드입니다.
 
-- **ollama → 프록시 불필요.** codex 가 `developer` 롤을 그대로 받아주므로(실측 200)
-  격리된 `.codex/config.toml` 에 커스텀 provider 하나만 정의하면 **직결**된다.
-- **vLLM → `developer` 롤 거부(400).** 이 레포는 사이에 `proxy.py` 를 세워
-  `developer→system` 만 교정해 포워드한다. (서버측 `--chat-template` 로도 고칠 수
-  있으나 공유 vLLM 엔 부적합 — 아래 "vLLM developer 롤 400" 참고.)
+**이 가이드로 할 수 있는 것**
+- codex 를 ollama 로컬 모델에 붙여 바로 코딩 시키기 (5분)
+- GPU 서버(vLLM)에 붙이기
+- codex 를 [terminal-bench](https://github.com/laude-institute/terminal-bench) 같은 벤치에 로컬 모델로 돌리기
 
+**이런 분께**: codex 는 써봤지만 로컬/사내 모델에 물려본 적 없는 분. 명령은 전부
+복사-붙여넣기로 동작하도록 적었고, 각 단계마다 "이렇게 나오면 성공"을 붙였습니다.
+
+---
+
+## 5분 빠른시작 — ollama
+
+가장 쉬운 경로입니다. **ollama 는 프록시가 필요 없어서** config 파일 하나만 고치면 됩니다.
+
+### 준비물
+- **codex CLI** — 터미널에서 `codex --version` 이 나오면 OK (0.137 이상 권장)
+- **ollama + 모델 하나** — 예: `ollama pull gemma4:12b` (또는 가진 모델 아무거나)
+  - `ollama list` 로 설치된 모델 이름을 확인해 두세요.
+
+> 팁: 코딩(파일 쓰기·명령 실행)까지 시키려면 **도구 호출(tool-calling)을 학습한 모델**이
+> 필요합니다. `gemma4:12b` 급은 됩니다. `qwen3:0.6b` 같은 초소형은 배선 확인엔 되지만
+> 실제 코딩은 잘 못합니다(뒤 "더 알아보기" 참고).
+
+### 1) 모델 이름 넣기
+이 레포의 `.codex/config.toml` 을 열어 `model` 값을 `ollama list` 의 이름으로 바꿉니다:
+
+```toml
+model = "gemma4:12b"          # <- 여기를 내 모델 이름으로
+model_provider = "local_ollama"
+
+[model_providers.local_ollama]
+name = "Local Ollama"
+base_url = "http://localhost:11434/v1"
+wire_api = "responses"
 ```
-[ollama]  codex ─(/v1/responses)────────────────────────▶ ollama:11434 (Qwen)
-[vLLM ]   codex ─(/v1/responses)─▶ proxy.py ─(교정)─▶ vLLM:8000 (Qwen)
-```
 
-두 경로 공통의 핵심 두 가지:
-1. **커스텀 provider + `wire_api="responses"`** — codex 0.137+ 는 responses 강제.
-   provider 를 명시해야 0.142+ 의 `ws://` 트랜스포트로 새지 않는다.
-   (`-c openai_base_url` 단독은 codex 0.142 에서 안 됨 — 아래 트러블슈팅.)
-2. **격리 `CODEX_HOME`** — 전역 `~/.codex`(훅·trust·로그)를 안 건드리도록
-   이 레포의 `.codex/` 를 CODEX_HOME 으로 쓴다.
-
-### 백엔드별 차이 (실측)
-
-| 백엔드 | `/v1/responses` | `developer` 롤 | 프록시 |
-|--------|-----------------|----------------|--------|
-| ollama | serve 함        | 그냥 받음(200) | **불필요** (직결) |
-| vLLM   | serve 함        | **거부(400)**  | **필수** (developer→system 병합) |
-
-응답(usage·function_call·SSE 스트림)은 전부 백엔드가 권위있게 생성한 것을 codex 에
-그대로 흘려보낸다. **손으로 짠 스키마 0 개** — codex 버전이 올라가도 잘 안 깨진다.
-
-## 구성
-
-| 파일 | 역할 |
-|------|------|
-| `.codex/config.toml` | 격리 codex 설정(CODEX_HOME). ollama 직결 provider. **ollama 는 이것만으로 끝.** |
-| `proxy.py` | vLLM 용 패스스루 프록시(`developer→system` 교정). 라이브러리+CLI 겸용. |
-| `run_codex.py` | 프록시 자동 기동 + codex 실행(주로 vLLM/SDK 경로). CODEX_HOME 격리 포함. |
-
-## 사용법
-
-### 1) 준비
-
-- codex CLI (`codex-cli` 0.137+ — `wire_api=responses` 강제하는 세대)
-- 로컬 Qwen 백엔드 중 하나:
-  - **ollama**: `ollama serve` + `ollama pull qwen3:0.6b` (엔드포인트 `http://localhost:11434/v1`)
-  - **vLLM**: `--served-model-name` 으로 Qwen serve (엔드포인트 `http://HOST:8000/v1`)
-- SDK 모드만 추가로 (uv 사용):
-  `uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python --prerelease=allow openai-codex`
-  > 주의: SDK(`openai-codex`)는 **자체 codex 바이너리를 번들**한다(현재 `openai-codex-cli-bin
-  > 0.137.0a4`). 시스템 `codex`(0.142.5)와 버전이 다르므로 SDK 경로는 0.137 동작을 탄다
-  > (ws:// 트랜스포트 문제 없는 세대). CLI 모드는 시스템 codex 를 그대로 쓴다.
-
-### 2) ollama — 프록시 없이 격리 config 로 직결 (권장)
-
-> 검증됨: codex-cli 0.142.5 + ollama qwen3:0.6b. 격리 `CODEX_HOME` 로 프롬프트
-> "PONG" → codex final "PONG". 전역 `~/.codex` 훅 하나도 안 뜸(격리 확인).
-> `run_codex.py` 의 `--mode cli`/`--mode sdk` 둘 다 ollama 왕복 검증(turns=1 errors=0).
-
-`.codex/config.toml` 의 `model` 을 `ollama list` 의 모델명으로 바꾼 뒤:
+### 2) codex 실행 (격리 모드)
+레포 폴더에서:
 
 ```bash
 CODEX_HOME="$PWD/.codex" codex exec \
   --skip-git-repo-check --ephemeral \
   --dangerously-bypass-approvals-and-sandbox \
-  "이 레포 구조 요약해줘"
+  "Reply with exactly the single word: PONG"
 ```
 
-프록시도, `run_codex.py` 도 필요 없다. config.toml 이 provider(wire_api=responses)를
-정의하니 codex 가 ollama `/v1/responses` 로 직결된다.
+### 3) 성공 확인
+마지막에 이렇게 나오면 성공입니다:
 
-### 3) vLLM — 프록시를 세우고 직결
+```
+PONG
+```
 
-vLLM 은 `developer` 롤을 거부하므로 프록시가 필수다.
+이제 프롬프트만 바꾸면 됩니다. 예를 들어 실제 코딩:
 
 ```bash
-# 터미널 A: 프록시 (--model 로 model 주입 → 0.142 "model required" 회피)
-python proxy.py --vllm http://10.20.0.9:8000/v1 \
+CODEX_HOME="$PWD/.codex" codex exec \
+  --skip-git-repo-check --ephemeral \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C /tmp/work \
+  "Create fizzbuzz.py with a fizzbuzz(n) function. Use the shell to write it."
+```
+
+> **왜 `CODEX_HOME="$PWD/.codex"` 인가?** 전역 `~/.codex`(내 개인 codex 설정·훅·로그)를
+> 안 건드리려는 격리 장치입니다. 이 레포의 `.codex/` 를 codex 의 집으로 지정해서, 실험이
+> 개인 환경을 오염시키지 않습니다. (실측: 이렇게 하면 개인 훅이 하나도 안 딸려 나옵니다.)
+
+---
+
+## 원리 한 컷
+
+codex 는 요청을 OpenAI `/v1/responses` 형식으로 보냅니다. 로컬 백엔드가 이 엔드포인트를
+서빙하면, codex 가 그쪽을 바라보게만 하면 됩니다.
+
+```
+[ollama]  codex ─(/v1/responses)────────────────────────▶ ollama:11434  (프록시 불필요)
+[vLLM ]   codex ─(/v1/responses)─▶ proxy.py ─(교정)─▶ vLLM:8000        (프록시 필요)
+```
+
+어느 경로든 두 가지만 지키면 됩니다:
+
+1. **커스텀 provider + `wire_api="responses"`** — codex 0.137+ 는 responses API 를
+   강제합니다. provider 를 명시해야 최신 codex(0.142+)가 엉뚱한 `ws://` 연결로 새지 않습니다.
+2. **격리 `CODEX_HOME`** — 위에서 본, 개인 환경 보호 장치.
+
+**ollama 는 왜 프록시가 필요 없고 vLLM 은 필요한가?** codex 는 시스템 지시를 `developer`
+라는 역할로 보냅니다. ollama 는 이걸 그냥 받아주지만(실측 200), vLLM 은 거부합니다(400).
+그래서 vLLM 앞에는 `developer` 를 `system` 으로 살짝 바꿔주는 얇은 프록시를 세웁니다.
+(자세한 원인·대안은 맨 아래 "더 알아보기".)
+
+---
+
+## vLLM(GPU 서버)에 붙이기
+
+vLLM 은 `developer` 역할을 거부하므로, 사이에 `proxy.py`(이 레포 동봉)를 세웁니다.
+프록시는 요청의 `developer`->`system` 만 고쳐 그대로 전달하는 얇은 중계기입니다.
+
+```bash
+# 터미널 A — 프록시 기동 (--model 로 모델명 주입: 0.142 의 "model required" 회피)
+python proxy.py --vllm http://<서버IP>:8000/v1 \
   --model Qwen/Qwen3.6-35B-A3B-FP8 --port 8731
 
-# 터미널 B: config.toml 의 model_provider 를 local_vllm 으로 바꾸거나, -c 로 오버라이드
+# 터미널 B — codex 를 프록시로 보냄
 CODEX_HOME="$PWD/.codex" codex exec \
   -c model_providers.local_vllm.base_url="http://localhost:8731/v1" \
   -c model_providers.local_vllm.wire_api="responses" \
@@ -90,173 +115,165 @@ CODEX_HOME="$PWD/.codex" codex exec \
   "이 레포 구조 요약해줘"
 ```
 
-또는 `run_codex.py` 로 프록시 기동+실행을 한 방에 (CODEX_HOME 격리 자동):
+**한 방에 하기** — `run_codex.py` 가 프록시 기동 + codex 실행 + CODEX_HOME 격리를 알아서 합니다:
 
 ```bash
 python run_codex.py \
-  --vllm http://10.20.0.9:8000/v1 \
+  --vllm http://<서버IP>:8000/v1 \
   --model Qwen/Qwen3.6-35B-A3B-FP8 \
   --cwd . --prompt "이 레포 구조 요약해줘" --mode cli
 ```
 
-### 5) SDK 모드 (openai-codex 파이썬 SDK)
+> 성공하면 `[turns=N errors=0]` 과 함께 codex 의 최종 답이 출력됩니다. `errors` 에 숫자가
+> 뜨면 백엔드가 되돌린 원문 에러이니 그걸 보고 원인을 잡으세요.
 
-`run_codex.py --mode sdk` 는 CLI 대신 SDK 로 codex 를 부른다. venv 의 python 으로 실행:
+---
+
+## SDK 로 붙이기 (선택)
+
+CLI 대신 `openai-codex` 파이썬 SDK 로 부르고 싶다면:
 
 ```bash
+# 설치 (uv 권장) — prerelease 입니다
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python --prerelease=allow openai-codex
+
+# 실행
 .venv/bin/python run_codex.py \
   --vllm http://localhost:11434/v1 \
-  --model qwen3:0.6b \
+  --model gemma4:12b \
   --cwd . --prompt "이 레포 구조 요약해줘" --mode sdk
 ```
 
-SDK 는 `model_providers` 를 코드로 주입한다(아래 "인터페이스 두 가지" 참고).
-ollama 상대로도 프록시를 거치지만, ollama 직결이면 프록시 없이 base_url 을 ollama 로
-직접 줘도 된다(SDK config 의 base_url 만 바꾸면 됨).
+> **주의**: SDK 는 **자체 codex 바이너리를 번들**합니다(현재 `openai-codex-cli-bin 0.137`).
+> 시스템 `codex`(0.142+)와 버전이 달라 동작이 미묘하게 다를 수 있습니다. CLI 모드는 시스템
+> codex 를, SDK 모드는 번들 codex 를 씁니다.
 
-### 4) 코드에서 (라이브러리)
+라이브러리로 프록시만 띄우고 싶다면:
 
 ```python
 from proxy import start_proxy
-
 _, stats = start_proxy("http://localhost:11434/v1", port=8731)
-# 이제 codex 를 http://localhost:8731/v1 로 가리키면 됨
-# stats["turns"] = 포워드 요청 수, stats["errors"] = 백엔드가 되돌린 에러
+# 이제 codex 를 http://localhost:8731/v1 로 가리키면 됩니다.
 ```
 
-## codex 를 부르는 인터페이스 두 가지
+---
 
-같은 백엔드(ollama 직결 또는 프록시)를 가리키되 codex 호출 방식만 다르다:
+## 터미널 벤치에 돌리기 (선택)
 
-**CLI** — `-c` 로 커스텀 provider 정의(또는 `.codex/config.toml` 에 박아두기):
-```
-codex exec \
-  -c model_providers.local.base_url="http://localhost:8731/v1" \
-  -c model_providers.local.wire_api="responses" \
-  -c model_provider="local" -m <model> ...
-```
-> 함정: `-c openai_base_url=...` 만 오버라이드하면 codex 0.142+ 는 기본 provider 의
-> 트랜스포트(`ws://`)를 써서 어긋난다. provider 를 명시해야 HTTP responses 로 간다.
-> (0.137 에선 openai_base_url 만으로 됐다 — 버전 차이.)
-
-**SDK** — `model_providers` 로 커스텀 provider 주입:
-```python
-codex.thread_start(
-    model=MODEL, model_provider="vllmresp",
-    config={"model_providers": {"vllmresp": {
-        "name": "vllmresp",
-        "base_url": "http://localhost:8731/v1",
-        "wire_api": "responses",   # codex 0.137+ 은 responses 강제
-    }}}, ...)
-```
-
-## 트러블슈팅
-
-| 증상 | 원인 / 해결 |
-|------|-------------|
-| `developer` 롤 400 | 백엔드(vLLM)가 developer 거부. 프록시를 거치는지 확인 — codex 가 백엔드에 **직결**돼 있으면 발생. `openai_base_url` 이 프록시(localhost:8731)를 가리키는지 확인. |
-| `stats["errors"]` 에 400/422 | 프록시는 백엔드 에러를 그대로 codex 로 되돌린다. 이 배열을 보면 백엔드가 실제로 뭘 거부했는지 원문이 보인다. |
-| codex 가 함수콜/도구를 안 씀 | 작은 모델(qwen3:0.6b 등)은 tool-use 신뢰성이 낮다. 배선 검증엔 OK, 실제 에이전트 작업엔 큰 Qwen 권장. |
-| `openai-codex` import 실패 | prerelease 다. `uv pip install --python .venv/bin/python --prerelease=allow openai-codex`. CLI 모드는 SDK 불필요. |
-| `wire_api=chat` 관련 오류 | codex 0.137+ 은 chat 을 드롭하고 responses 강제. 백엔드가 `/v1/responses` 를 serve 하는지 확인(ollama/vLLM 둘 다 지원). |
-| `unexpected status 200 OK ... ws://` | codex 0.142+ 가 기본 provider 로 WebSocket 트랜스포트를 시도. **커스텀 provider 를 명시**(`model_providers.local.wire_api="responses"`)하면 HTTP 로 간다. `-c openai_base_url` 단독은 안 됨. |
-| `model is required` (ollama 400) | codex 0.142+ 가 responses 바디에 model 을 안 싣는 경우. 프록시 `--model` 로 주입하면 해결(run_codex.py 는 자동 전달). |
-
-## terminal-bench 어댑터 (`tb_codex_local.py`)
-
-codex 를 로컬 ollama 모델로 [terminal-bench](https://github.com/laude-institute/terminal-bench)
-에 돌리는 커스텀 에이전트. 기본 `CodexAgent` 는 OpenAI 클라우드로만 나가므로, 컨테이너
-안 codex 를 호스트 ollama 로 라우팅하도록 `-c` provider 플래그를 주입한다(codex_qwen
-배선의 이식). 동봉 `codex-setup.sh.j2` 는 컨테이너에 codex 를 설치하는 템플릿.
+`tb_codex_local.py`(동봉)는 codex 를 로컬 ollama 모델로
+[terminal-bench](https://github.com/laude-institute/terminal-bench) 에 돌리는 어댑터입니다.
 
 ```bash
-uv tool install terminal-bench                      # tb CLI
+uv tool install terminal-bench
 tb datasets download -d terminal-bench-core==0.1.1 --output-dir /tmp/tbcore
 
-export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"   # Colima 사용 시(아래 함정)
+# Colima 를 쓴다면(Docker Desktop 아님) 소켓 경로를 알려줘야 합니다
+export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+
 OPENAI_API_KEY=ollama-dummy PYTHONPATH=. tb run \
   -p /tmp/tbcore -t hello-world \
   --agent-import-path tb_codex_local:CodexLocalAgent \
   -m local/gemma4:12b --n-concurrent 1 --no-livestream
 ```
 
-`-m local/gemma4:12b` 의 `local/` 접두는 CodexAgent 가 `/` 뒤만 모델명으로 쓰기 때문
-(→ `gemma4:12b`). ollama `list` 의 모델명으로 교체.
+> `-m local/gemma4:12b` 의 `local/` 접두는 형식상 필요(codex 는 `/` 뒤만 모델명으로 씀 ->
+> `gemma4:12b`). ollama `list` 의 이름으로 바꾸세요.
 
-### 실측 결과 (codex-cli npm + gemma4:12b, Mac/Colima)
+**실측 결과** (codex-cli + gemma4:12b, Mac/Colima):
 
 | 태스크 | 난이도 | 결과 |
 |--------|--------|------|
-| hello-world | easy | PASS (~1분, 2/2 테스트) |
-| heterogeneous-dates | medium | PASS (~10분, 3/3) — 단 agent timeout 3600s 필요 |
+| hello-world | easy | PASS (~1분, 2/2) |
+| heterogeneous-dates | medium | PASS (~10분, 3/3) — 단 `--global-agent-timeout-sec 3600` 필요 |
 
-heterogeneous-dates 는 기본 360s 캡에선 정답을 도출하고도 파일 저장 직전 timeout →
-캡만 늘리면 통과(로컬 12B 추론 속도가 병목, 역량 아님).
+> heterogeneous-dates 는 기본 360초 캡에선 정답을 다 계산하고도 파일 저장 직전에 시간이
+> 끊깁니다. 캡만 늘리면 통과합니다. 로컬 12B 의 추론 속도가 병목이지 역량 문제가 아닙니다.
 
-### 함정 (실측)
+자주 만나는 함정은 아래 "문제 해결" 표에 있습니다.
 
-| 증상 | 원인 / 해결 |
+---
+
+## 문제 해결
+
+증상이 보이면 오른쪽대로 해보세요.
+
+| 증상 | 이렇게 하세요 |
 |------|-------------|
-| `docker ... Connection aborted, FileNotFoundError` | tb 의 docker-py 가 소켓 못 찾음. Colima 는 `~/.colima/default/docker.sock` → `DOCKER_HOST` 로 지정. Docker Desktop 이 아닐 때 발생. |
-| `Template file not found: codex-setup.sh.j2` | 커스텀 에이전트는 템플릿을 **자기 모듈 폴더**에서 찾는다(`inspect.getfile`). 원본 템플릿을 어댑터 옆에 복사(동봉함). |
-| Agent 360s timeout / heredoc 멈춤 | tb 가 명령 끝에 `; tmux wait -S done` 를 같은 줄에 붙여 config.toml heredoc 의 종료 `EOF` 를 깬다. → config 파일 대신 `-c` 플래그로 provider 인라인 주입(어댑터가 그렇게 함). |
-| 컨테이너→호스트 ollama | Docker Desktop/Colima 모두 `host.docker.internal` 로 호스트 127.0.0.1:11434 도달(ollama 재바인딩 불필요). |
+| `developer` 롤 **400** | 백엔드가 vLLM 인데 프록시를 안 거쳤을 때. codex 가 프록시(`localhost:8731`)를 보게 했는지 확인. (ollama 는 이 에러가 안 납니다.) |
+| `unexpected status 200 OK ... ws://` | codex 0.142+ 가 기본 provider 로 WebSocket 을 시도한 것. **커스텀 provider 를 명시**(`model_providers.<name>.wire_api="responses"`)하세요. `-c openai_base_url` **단독은 안 됩니다.** |
+| `model is required` (ollama 400) | codex 0.142+ 가 바디에 모델명을 안 실은 경우. 프록시에 `--model` 을 주면 주입해 줍니다(`run_codex.py` 는 자동). |
+| `wire_api=chat` 관련 오류 | codex 0.137+ 는 chat 을 드롭하고 responses 만 씁니다. 백엔드가 `/v1/responses` 를 서빙하는지 확인(ollama·vLLM 둘 다 지원). |
+| codex 가 파일/도구를 안 씀 | 모델이 너무 작습니다(예: `qwen3:0.6b`). 배선 확인엔 되지만 실제 코딩엔 도구 호출을 학습한 큰 모델(gemma4:12b 급)을 쓰세요. |
+| `openai-codex` import 실패 | prerelease 라 `uv pip install --prerelease=allow openai-codex` 필요. CLI 모드는 SDK 없이 됩니다. |
+| `docker ... Connection aborted, FileNotFoundError` (terminal-bench) | **Colima** 사용 시 발생. `export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"`. |
+| `Template file not found: codex-setup.sh.j2` (terminal-bench) | 어댑터는 템플릿을 자기 폴더에서 찾습니다. 동봉된 `codex-setup.sh.j2` 가 `tb_codex_local.py` 옆에 있어야 합니다. |
 
-## vLLM 의 developer 롤 400 — 원인과 두 해법 (실증)
+---
 
-codex 는 시스템 지시를 `developer` 롤로 보내는데 vLLM 은 400 `"Unexpected message
-role."` 로 거부한다. **원인을 실 vLLM(Qwen3.6, 0.22.0)에서 추적한 결과 이 거부는
-서버 파이썬 코드가 아니라 모델의 Jinja chat template 에서 난다:**
+## 이 레포에 뭐가 있나
+
+| 파일 | 역할 |
+|------|------|
+| `.codex/config.toml` | 격리 codex 설정(CODEX_HOME). **ollama 는 이 파일만 고치면 끝.** |
+| `proxy.py` | vLLM 용 프록시(`developer->system` 교정). 라이브러리+CLI 겸용. |
+| `run_codex.py` | 프록시 기동 + codex 실행(CLI/SDK), CODEX_HOME 격리 포함. |
+| `tb_codex_local.py` + `codex-setup.sh.j2` | terminal-bench 어댑터. |
+
+---
+
+## 더 알아보기
+
+<details>
+<summary><b>vLLM 은 왜 developer 롤을 거부하나 — 원인과 두 해법 (실증)</b></summary>
+
+codex 는 시스템 지시를 `developer` 역할로 보내는데 vLLM 은 400 `"Unexpected message
+role."` 로 거부합니다. 실 vLLM(Qwen3.6, 0.22.0)에서 추적한 결과, 이 거부는 서버 파이썬
+코드가 아니라 모델의 Jinja chat template 에서 납니다:
 
 ```jinja
 {%- if message.role == "system" %} ...
 {%- elif message.role == "user" %} ...
 {%- elif message.role == "assistant" %} ...
 {%- elif message.role == "tool" %} ...
-{%- else %}{{- raise_exception('Unexpected message role.') }}   ← developer 가 여기로
+{%- else %}{{- raise_exception('Unexpected message role.') }}   <- developer 가 여기로
 ```
 
-400 바디의 문자열(`Unexpected message role.`, 마침표까지)이 Qwen 템플릿의
-`raise_exception` 과 정확히 일치. 즉 거부는 **template 계층**이라, 두 가지로 고칠 수 있다:
+400 바디의 문자열(`Unexpected message role.`, 마침표까지)이 Qwen 템플릿의 `raise_exception`
+과 정확히 일치합니다. 거부가 template 계층이라 두 가지로 고칠 수 있습니다:
 
-**해법 A — 엣지 프록시 (이 레포)**: `developer→system` 을 요청단에서 relabel.
-vLLM 무변경, 모델·버전 무관, 요청 단위 격리. `developer` 없는 요청엔 no-op.
+- **해법 A — 엣지 프록시 (이 레포)**: `developer->system` 을 요청단에서 relabel.
+  vLLM 무변경, 모델·버전 무관, 요청 단위 격리. `developer` 없는 요청엔 no-op.
+- **해법 B — 서버측 `--chat-template`**: developer 분기를 추가한 템플릿으로 vLLM 기동.
+  ```jinja
+  {%- elif message.role == "developer" %}
+      {{- '<|im_start|>system\n' + content + '<|im_end|>' + '\n' }}
+  ```
+  ```bash
+  vllm serve <model> --chat-template /path/to/qwen_dev_patched.jinja ...
+  ```
 
-**해법 B — 서버측 `--chat-template`**: developer 분기를 추가한 템플릿으로 vLLM 기동.
-```jinja
-{%- elif message.role == "developer" %}
-    {{- '<|im_start|>system\n' + content + '<|im_end|>' + '\n' }}
-```
-```bash
-vllm serve <model> --chat-template /path/to/qwen_dev_patched.jinja ...
-```
-
-### 검증 (llm-test A100 VM, Qwen3.6-27B-FP8, 2026-07-02)
-
-실 배포 템플릿을 추출해 패치하고 실 vLLM 왕복까지 확인:
+**검증** (llm-test A100 VM, Qwen3.6-27B-FP8):
 
 | 항목 | 결과 |
 |------|------|
 | 패치 전 developer 롤 | **400** `"Unexpected message role."` |
-| 실 템플릿 + transformers 렌더러(=vLLM) | 원본→raise / 패치→렌더 |
-| **기존 트래픽(system/user/assistant/tool)** | 패치 전후 **바이트 동일 → 영향 0** |
+| 실 템플릿 + transformers 렌더러(=vLLM) | 원본->raise / 패치->렌더 |
+| 기존 트래픽(system/user/assistant/tool) | 패치 전후 **바이트 동일 -> 영향 0** |
 | `--chat-template` 적용·재기동 후 developer 롤 | **200**, 모델이 developer 지시 수신 |
-| user baseline | 200 (불변) |
 
-### 어느 걸 쓰나
+**어느 걸 쓰나**: **공유 vLLM**(여러 서비스가 함께 쓰는 서버)이면 재기동·전역 변경이 없는
+프록시(A)가 안전합니다. **전용 인스턴스**면 근본해결인 `--chat-template`(B)가 깔끔합니다.
+(참고: 최신 vLLM `chat_utils` 는 developer 를 인지하므로 업그레이드도 서버측 해법입니다.)
 
-| | 프록시(A) | `--chat-template`(B) |
-|---|---|---|
-| 기존 소비자 영향 | 없음(요청단 격리) | 재기동 다운타임 + 전역 blast radius |
-| vLLM 재시작 | 불필요 | 필요 |
-| 유지보수 | 배선 하나 | 모델마다 템플릿 fork |
+</details>
 
-**공유 vLLM**(analyzer·eval 이 함께 쓰는 서버)이면 재기동·전역 변경을 피할 수 있는
-프록시(A)가 안전. **전용 인스턴스**면 근본해결인 `--chat-template`(B)가 깔끔.
-(참고: 최신 vLLM `chat_utils` 는 developer 를 인지 — 업그레이드도 서버측 해법.)
+<details>
+<summary><b>계보 — 이 코드는 어디서 왔나</b></summary>
 
-## 계보
+원본은 `ops_check_engine/research/cx/native_codex.py`(cx 실험용, 채점 로직 혼재)입니다.
+여기선 재사용 가능한 프록시+러너만 추출했습니다. 설계 정수는 **"스키마를 손으로 짜지
+않는다"**는 것입니다. 백엔드의 `/v1/responses` 출력을 그대로 패스스루하니, codex 가 버전업해도 잘
+깨지지 않습니다.
 
-원본은 `ops_check_engine/research/cx/native_codex.py`(cx 실험용, 채점 로직 혼재).
-여기선 재사용 가능한 프록시+러너만 추출했다. 설계 정수는 "스키마를 손으로 짜지
-않는다" — 백엔드의 `/v1/responses` 출력을 그대로 패스스루하니 유지보수 표면이 최소.
+</details>
